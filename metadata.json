@@ -1,0 +1,6 @@
+{
+  "name": "Location-Tracking URL Redirector",
+  "description": "Create tracking redirect links and log visitor geolocations, showing live analytics on an interactive map.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
