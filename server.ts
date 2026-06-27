@@ -1034,8 +1034,6 @@ app.get("/t/:shortCode", async (req, res) => {
           <div class="orbit">
             <div class="radar-pulse"></div>
           </div>
-          <h1>Routing secure gateway...</h1>
-          <p>Please wait, verifying connection certificate and establishing high-precision digital link.</p>
           <div class="progress-bar">
             <div class="progress-line"></div>
           </div>
